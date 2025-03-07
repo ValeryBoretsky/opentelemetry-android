@@ -17,6 +17,7 @@ import io.opentelemetry.sdk.OpenTelemetrySdk
 import io.opentelemetry.sdk.logs.LogRecordProcessor
 import io.opentelemetry.sdk.logs.ReadWriteLogRecord
 import io.opentelemetry.sdk.logs.SdkLoggerProvider
+import io.opentelemetry.sdk.logs.data.internal.ExtendedLogRecordData
 import io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.assertThat
 import io.opentelemetry.sdk.trace.export.SpanExporter
 import org.junit.jupiter.api.Test
@@ -61,12 +62,12 @@ class SdkInitializationEventsTest {
         events.currentNetworkProviderInitialized()
         events.networkMonitorInitialized()
         events.slowRenderingDetectorInitialized()
-        events.spanExporterInitialized(exporter)
 
         verify { listOf(processor) wasNot called }
         verify(exactly = 0) { exporter.export(any()) }
 
         events.finish(sdk)
+        events.spanExporterInitialized(exporter)
 
         assertThat(seen).satisfiesExactly(
             time(now).named(RumConstants.Events.INIT_EVENT_STARTED),
@@ -82,19 +83,19 @@ class SdkInitializationEventsTest {
         )
     }
 
-    fun time(timeMs: Long): EventAssert = EventAssert(TimeUnit.MILLISECONDS.toNanos(timeMs))
+    private fun time(timeMs: Long): EventAssert = EventAssert(TimeUnit.MILLISECONDS.toNanos(timeMs))
 
     class EventAssert(
-        val timeNs: Long,
+        private val timeNs: Long,
     ) : Consumer<ReadWriteLogRecord> {
-        lateinit var name: String
-        var body: Value<*>? = null
-        var attrs: Attributes? = null
+        private lateinit var name: String
+        private var body: Value<*>? = null
+        private var attrs: Attributes? = null
 
         override fun accept(log: ReadWriteLogRecord) {
-            val logData = log.toLogRecordData()
+            val logData: ExtendedLogRecordData = log.toLogRecordData() as ExtendedLogRecordData
             assertThat(logData.timestampEpochNanos).isEqualTo(timeNs)
-            assertThat(logData.attributes.get(stringKey("event.name"))).isEqualTo(name)
+            assertThat(logData.eventName).isEqualTo(name)
             if (body == null) {
                 assertThat(logData.bodyValue).isNull()
             } else {
@@ -110,16 +111,11 @@ class SdkInitializationEventsTest {
             return this
         }
 
-        fun withBody(body: Value<*>): EventAssert {
-            this.body = body
-            return this
-        }
-
         fun withAttributes(
             key: String,
             value: String,
         ): EventAssert {
-            attrs = Attributes.of(stringKey("event.name"), name, stringKey(key), value)
+            attrs = Attributes.of(stringKey(key), value)
             return this
         }
     }

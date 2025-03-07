@@ -11,17 +11,18 @@ import android.util.Log
 import io.opentelemetry.android.OpenTelemetryRum
 import io.opentelemetry.android.OpenTelemetryRumBuilder
 import io.opentelemetry.android.config.OtelRumConfig
-import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfiguration
+import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfig
 import io.opentelemetry.android.instrumentation.sessions.SessionInstrumentation
 import io.opentelemetry.api.common.AttributeKey.stringKey
 import io.opentelemetry.api.common.Attributes
-import io.opentelemetry.api.incubator.events.EventBuilder
+import io.opentelemetry.api.incubator.logs.ExtendedLogRecordBuilder
+import io.opentelemetry.api.logs.LogRecordBuilder
+import io.opentelemetry.api.metrics.LongCounter
 import io.opentelemetry.api.trace.Tracer
 import io.opentelemetry.exporter.otlp.http.logs.OtlpHttpLogRecordExporter
 import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter
 import io.opentelemetry.exporter.otlp.logs.OtlpGrpcLogRecordExporter
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter
-import io.opentelemetry.sdk.logs.internal.SdkEventLoggerProvider
 
 const val TAG = "otel.demo"
 
@@ -31,15 +32,12 @@ class OtelDemoApplication : Application() {
         super.onCreate()
 
         Log.i(TAG, "Initializing the opentelemetry-android-agent")
-        val diskBufferingConfig =
-            DiskBufferingConfiguration.builder()
-                .setEnabled(true)
-                .setMaxCacheSize(10_000_000)
-                .build()
+        val diskBufferingConfig = DiskBufferingConfig(
+            enabled = true, maxCacheSize = 10_000_000, debugEnabled = true);
         val config =
             OtelRumConfig()
                 .setGlobalAttributes(Attributes.of(stringKey("toolkit"), "jetpack compose"))
-                .setDiskBufferingConfiguration(diskBufferingConfig)
+                .setDiskBufferingConfig(diskBufferingConfig)
 
         // 10.0.2.2 is apparently a special binding to the host running the emulator
         val spansIngestUrl = "http://10.0.2.2:4318/v1/traces"
@@ -93,11 +91,14 @@ class OtelDemoApplication : Application() {
             return rum?.openTelemetry?.tracerProvider?.get(name)
         }
 
-        fun eventBuilder(scopeName: String, eventName: String): EventBuilder {
-            val loggerProvider = rum?.openTelemetry?.logsBridge
-            val eventLogger =
-                SdkEventLoggerProvider.create(loggerProvider).get(scopeName)
-            return eventLogger.builder(eventName)
+        fun counter(name: String): LongCounter? {
+            return rum?.openTelemetry?.meterProvider?.get("demo.app")?.counterBuilder(name)?.build()
+        }
+
+        fun eventBuilder(scopeName: String, eventName: String): LogRecordBuilder {
+            val logger = rum?.openTelemetry?.logsBridge?.loggerBuilder(scopeName)?.build()
+            var builder: ExtendedLogRecordBuilder = logger?.logRecordBuilder() as ExtendedLogRecordBuilder
+            return builder.setEventName(eventName)
         }
     }
 }

@@ -37,6 +37,64 @@ from release-to-release prior to v1.0.0.
 - Support newer Android network APIs for API >=29.
   ([#736](https://github.com/open-telemetry/opentelemetry-android/pull/736))
 
+- This version builds on opentelemetry-java-instrumentation
+  [v2.13.3](https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/tag/v2.13.3).
+
+### ⚠️⚠️ Breaking changes
+
+- New maven coordinates for http client instrumentations ([#791](https://github.com/open-telemetry/opentelemetry-android/pull/791))
+  - `okhttp-3.0-library` -> `instrumentation-okhttp-3.0-library`
+  - `okhttp-3.0-agent` -> `instrumentation-okhttp-3.0-agent`
+  - `httpurlconnection-library` -> `instrumentation-httpurlconnection-library`
+  - `httpurlconnection-agent` -> `instrumentation-httpurlconnection-agent`
+- Remove deprecated `exception.escaped` attribute from crash events ([#796](https://github.com/open-telemetry/opentelemetry-android/pull/796))
+- `DiskBufferingConfiguration` renamed to `DiskBufferingConfig` ([#753](https://github.com/open-telemetry/opentelemetry-android/pull/753))
+- Remove `ServiceManager` instance from `InstallationContext` ([#763](https://github.com/open-telemetry/opentelemetry-android/pull/763))
+- Remove hard-coded `exception.escaped` attribute from crashes ([#796](https://github.com/open-telemetry/opentelemetry-android/pull/796))
+- Drop support for Kotlin 1.7 ([#869](https://github.com/open-telemetry/opentelemetry-android/pull/869))
+
+### 📈 Enhancements
+
+- The android-agent module now publishes a Bill of Materials (BOM).
+  This BOM can be used to coordinate platform dependency versions across the various
+  modules contained in opentelemetry-android ([#809](https://github.com/open-telemetry/opentelemetry-android/pull/809))
+- Add ability to enable verbose debug for disk buffering config ([#753](https://github.com/open-telemetry/opentelemetry-android/pull/753))
+- Ensure current screen attribute is included in logs, when configured ([#785](https://github.com/open-telemetry/opentelemetry-android/pull/785))
+- Default max cache size for disk buffering reduced from 60MB to 10MB ([#822](https://github.com/open-telemetry/opentelemetry-android/pull/822))
+- Improve concurrency/threading for initialization events ([#836](https://github.com/open-telemetry/opentelemetry-android/pull/836))
+- Remove minimum disk buffering cache size requirement and pre-allocation ([#828](https://github.com/open-telemetry/opentelemetry-android/pull/828))
+- Add ability to customize the directory used for disk buffering ([#871](https://github.com/open-telemetry/opentelemetry-android/pull/871))
+
+## Version 0.9.0 (2025-01-15)
+
+- This version builds on opentelemetry-java-instrumentation
+  [v2.11.0](https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/tag/v2.11.0).
+
+### ⚠️⚠️Breaking changes
+
+A reminder that this project is still alpha and may contain breaking changes
+from release-to-release prior to v1.0.0.
+
+- The `AndroidInstrumentation.install()` method signature has changed. Any 3rd-party
+  instrumentation written to this interface will need to be updated.
+  ([#671](https://github.com/open-telemetry/opentelemetry-android/pull/671))
+
+### 📈 Enhancements
+
+- Add the current screen name to crash events.
+  ([#704](https://github.com/open-telemetry/opentelemetry-android/pull/704))
+- Add R8 consumer rules.
+  ([#685](https://github.com/open-telemetry/opentelemetry-android/pull/685))
+- Append the session id attribute to all LogRecords.
+  ([#697](https://github.com/open-telemetry/opentelemetry-android/pull/697))
+- Add support for wired network types in the network detector.
+  ([#673](https://github.com/open-telemetry/opentelemetry-android/pull/673))
+- Add ability to generate session start/end events. This feature is currently opt-in.
+  ([#717](https://github.com/open-telemetry/opentelemetry-android/pull/717),
+   [#719](https://github.com/open-telemetry/opentelemetry-android/pull/719))
+- Support newer Android network APIs for API >=29.
+  ([#736](https://github.com/open-telemetry/opentelemetry-android/pull/736))
+
 ## Version 0.8.0 (2024-10-18)
 
 ### 📈 Enhancements

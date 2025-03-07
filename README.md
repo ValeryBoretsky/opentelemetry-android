@@ -2,6 +2,8 @@
 
 [![Continuous Build][ci-image]][ci-url]
 [![Maven Central][maven-image]][maven-url]
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/open-telemetry/opentelemetry-android/badge)](https://scorecard.dev/viewer/?uri=github.com/open-telemetry/opentelemetry-android)
+[![android api](https://img.shields.io/badge/Android_API-21-green.svg "Android min API 21")](VERSIONING.md)
 
 ## Status: Experimental
 
@@ -41,7 +43,7 @@ in your gradle build script:
 ```kotlin
 dependencies {
     //...
-    implementation("io.opentelemetry.android:android-agent:0.8.0-alpha")
+    implementation("io.opentelemetry.android:android-agent:0.9.0-alpha")
     //...
 }
 ```
@@ -52,10 +54,11 @@ This android library builds on top of
 the [OpenTelemetry Java SDK](https://github.com/open-telemetry/opentelemetry-java).
 Some of the additional features provided include:
 
-* Crash reporting
-* ANR detection
-* Network change detection
-* Full Android Activity and Fragment lifecycle monitoring
+* [Crash reporting](./instrumentation/crash/)
+* [ANR detection](./instrumentation/anr/)
+* [Network change detection](./instrumentation/network/)
+* Android [Activity lifecycle instrumentation](./instrumentation/activity/)
+* Android Fragment lifecycle monitoring
 * Access to the OpenTelemetry APIs for manual instrumentation
 * Helpers to redact any span from export, or change span attributes before export
 * Slow / frozen render detection

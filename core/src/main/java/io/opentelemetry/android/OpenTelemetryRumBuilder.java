@@ -15,8 +15,9 @@ import androidx.annotation.VisibleForTesting;
 import io.opentelemetry.android.common.RumConstants;
 import io.opentelemetry.android.config.OtelRumConfig;
 import io.opentelemetry.android.export.BufferDelegatingLogExporter;
+import io.opentelemetry.android.export.BufferDelegatingMetricExporter;
 import io.opentelemetry.android.export.BufferDelegatingSpanExporter;
-import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfiguration;
+import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfig;
 import io.opentelemetry.android.features.diskbuffering.SignalFromDiskExporter;
 import io.opentelemetry.android.features.diskbuffering.scheduler.DefaultExportScheduleHandler;
 import io.opentelemetry.android.features.diskbuffering.scheduler.DefaultExportScheduler;
@@ -30,10 +31,8 @@ import io.opentelemetry.android.internal.processors.GlobalAttributesLogRecordApp
 import io.opentelemetry.android.internal.processors.ScreenAttributesLogRecordProcessor;
 import io.opentelemetry.android.internal.processors.SessionIdLogRecordAppender;
 import io.opentelemetry.android.internal.services.CacheStorage;
-import io.opentelemetry.android.internal.services.Preferences;
-import io.opentelemetry.android.internal.services.ServiceManager;
-import io.opentelemetry.android.internal.services.ServiceManagerImpl;
-import io.opentelemetry.android.internal.services.periodicwork.PeriodicWorkService;
+import io.opentelemetry.android.internal.services.Services;
+import io.opentelemetry.android.internal.services.periodicwork.PeriodicWork;
 import io.opentelemetry.android.internal.session.SessionIdTimeoutHandler;
 import io.opentelemetry.android.internal.session.SessionManagerImpl;
 import io.opentelemetry.android.session.SessionManager;
@@ -44,9 +43,12 @@ import io.opentelemetry.context.propagation.ContextPropagators;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.contrib.disk.buffering.LogRecordFromDiskExporter;
 import io.opentelemetry.contrib.disk.buffering.LogRecordToDiskExporter;
+import io.opentelemetry.contrib.disk.buffering.MetricFromDiskExporter;
+import io.opentelemetry.contrib.disk.buffering.MetricToDiskExporter;
 import io.opentelemetry.contrib.disk.buffering.SpanFromDiskExporter;
 import io.opentelemetry.contrib.disk.buffering.SpanToDiskExporter;
 import io.opentelemetry.contrib.disk.buffering.StorageConfiguration;
+import io.opentelemetry.exporter.logging.LoggingMetricExporter;
 import io.opentelemetry.exporter.logging.LoggingSpanExporter;
 import io.opentelemetry.exporter.logging.SystemOutLogRecordExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -57,6 +59,9 @@ import io.opentelemetry.sdk.logs.export.BatchLogRecordProcessor;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.metrics.SdkMeterProvider;
 import io.opentelemetry.sdk.metrics.SdkMeterProviderBuilder;
+import io.opentelemetry.sdk.metrics.export.MetricExporter;
+import io.opentelemetry.sdk.metrics.export.MetricReader;
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.SdkTracerProviderBuilder;
@@ -92,16 +97,14 @@ public final class OpenTelemetryRumBuilder {
     private final List<Consumer<OpenTelemetrySdk>> otelSdkReadyListeners = new ArrayList<>();
     private final SessionIdTimeoutHandler timeoutHandler;
     private Function<? super SpanExporter, ? extends SpanExporter> spanExporterCustomizer = a -> a;
+    private Function<? super MetricExporter, ? extends MetricExporter> metricExporterCustomizer =
+            a -> a;
     private Function<? super LogRecordExporter, ? extends LogRecordExporter>
             logRecordExporterCustomizer = a -> a;
     private Function<? super TextMapPropagator, ? extends TextMapPropagator> propagatorCustomizer =
             (a) -> a;
 
     private Resource resource;
-
-    private boolean isBuilt = false;
-
-    @Nullable private ServiceManager serviceManager;
 
     @Nullable private ExportScheduleHandler exportScheduleHandler;
     @Nullable private SessionManager sessionManager;
@@ -131,7 +134,6 @@ public final class OpenTelemetryRumBuilder {
      * @return {@code this}
      */
     public OpenTelemetryRumBuilder setResource(Resource resource) {
-        checkNotBuilt();
         this.resource = resource;
         return this;
     }
@@ -144,7 +146,6 @@ public final class OpenTelemetryRumBuilder {
      * @return {@code this}
      */
     public OpenTelemetryRumBuilder mergeResource(Resource resource) {
-        checkNotBuilt();
         this.resource = this.resource.merge(resource);
         return this;
     }
@@ -184,7 +185,6 @@ public final class OpenTelemetryRumBuilder {
      */
     public OpenTelemetryRumBuilder addMeterProviderCustomizer(
             BiFunction<SdkMeterProviderBuilder, Application, SdkMeterProviderBuilder> customizer) {
-        checkNotBuilt();
         meterProviderCustomizers.add(customizer);
         return this;
     }
@@ -205,7 +205,6 @@ public final class OpenTelemetryRumBuilder {
     public OpenTelemetryRumBuilder addLoggerProviderCustomizer(
             BiFunction<SdkLoggerProviderBuilder, Application, SdkLoggerProviderBuilder>
                     customizer) {
-        checkNotBuilt();
         loggerProviderCustomizers.add(customizer);
         return this;
     }
@@ -217,7 +216,6 @@ public final class OpenTelemetryRumBuilder {
      */
     public OpenTelemetryRumBuilder addInstrumentation(AndroidInstrumentation instrumentation) {
         instrumentations.add(instrumentation);
-        checkNotBuilt();
         return this;
     }
 
@@ -232,7 +230,6 @@ public final class OpenTelemetryRumBuilder {
     public OpenTelemetryRumBuilder addPropagatorCustomizer(
             Function<? super TextMapPropagator, ? extends TextMapPropagator> propagatorCustomizer) {
         requireNonNull(propagatorCustomizer, "propagatorCustomizer");
-        checkNotBuilt();
         Function<? super TextMapPropagator, ? extends TextMapPropagator> existing =
                 this.propagatorCustomizer;
         this.propagatorCustomizer =
@@ -252,13 +249,31 @@ public final class OpenTelemetryRumBuilder {
     public OpenTelemetryRumBuilder addSpanExporterCustomizer(
             Function<? super SpanExporter, ? extends SpanExporter> spanExporterCustomizer) {
         requireNonNull(spanExporterCustomizer, "spanExporterCustomizer");
-        checkNotBuilt();
         Function<? super SpanExporter, ? extends SpanExporter> existing =
                 this.spanExporterCustomizer;
         this.spanExporterCustomizer =
                 exporter -> {
                     SpanExporter intermediate = existing.apply(exporter);
                     return spanExporterCustomizer.apply(intermediate);
+                };
+        return this;
+    }
+
+    /**
+     * Adds a {@link Function} to invoke with the default {@link MetricExporter} to allow
+     * customization. The return value of the {@link Function} will replace the passed-in argument.
+     *
+     * <p>Multiple calls will execute the customizers in order.
+     */
+    public OpenTelemetryRumBuilder addMetricExporterCustomizer(
+            Function<? super MetricExporter, ? extends MetricExporter> metricExporterCustomizer) {
+        requireNonNull(metricExporterCustomizer, "metricExporterCustomizer");
+        Function<? super MetricExporter, ? extends MetricExporter> existing =
+                this.metricExporterCustomizer;
+        this.metricExporterCustomizer =
+                exporter -> {
+                    MetricExporter intermediate = existing.apply(exporter);
+                    return metricExporterCustomizer.apply(intermediate);
                 };
         return this;
     }
@@ -272,7 +287,6 @@ public final class OpenTelemetryRumBuilder {
     public OpenTelemetryRumBuilder addLogRecordExporterCustomizer(
             Function<? super LogRecordExporter, ? extends LogRecordExporter>
                     logRecordExporterCustomizer) {
-        checkNotBuilt();
         Function<? super LogRecordExporter, ? extends LogRecordExporter> existing =
                 this.logRecordExporterCustomizer;
         this.logRecordExporterCustomizer =
@@ -293,17 +307,15 @@ public final class OpenTelemetryRumBuilder {
      * @return A new {@link OpenTelemetryRum} instance.
      */
     public OpenTelemetryRum build() {
-        if (isBuilt) {
-            throw new IllegalStateException("You cannot call build multiple times");
-        }
-        isBuilt = true;
+        Services services = Services.get(application);
         InitializationEvents initializationEvents = InitializationEvents.get();
-        applyConfiguration(initializationEvents);
-
-        BufferDelegatingLogExporter bufferDelegatingLogExporter = new BufferDelegatingLogExporter();
+        applyConfiguration(services, initializationEvents);
 
         BufferDelegatingSpanExporter bufferDelegatingSpanExporter =
                 new BufferDelegatingSpanExporter();
+        BufferDelegatingLogExporter bufferDelegatingLogExporter = new BufferDelegatingLogExporter();
+        BufferDelegatingMetricExporter bufferDelegatingMetricExporter =
+                new BufferDelegatingMetricExporter();
 
         if (sessionManager == null) {
             sessionManager =
@@ -318,7 +330,8 @@ public final class OpenTelemetryRumBuilder {
                         .setLoggerProvider(
                                 buildLoggerProvider(
                                         sessionManager, application, bufferDelegatingLogExporter))
-                        .setMeterProvider(buildMeterProvider(application))
+                        .setMeterProvider(
+                                buildMeterProvider(application, bufferDelegatingMetricExporter))
                         .setPropagators(buildFinalPropagators())
                         .build();
 
@@ -331,16 +344,18 @@ public final class OpenTelemetryRumBuilder {
                         timeoutHandler,
                         sessionManager,
                         config.shouldDiscoverInstrumentations(),
-                        getServiceManager());
+                        services);
 
         // AsyncTask is deprecated but the thread pool is still used all over the Android SDK
         // and it provides a way to get a background thread without having to create a new one.
         android.os.AsyncTask.THREAD_POOL_EXECUTOR.execute(
                 () ->
                         initializeExporters(
+                                services,
                                 initializationEvents,
                                 bufferDelegatingSpanExporter,
-                                bufferDelegatingLogExporter));
+                                bufferDelegatingLogExporter,
+                                bufferDelegatingMetricExporter));
 
         instrumentations.forEach(delegate::addInstrumentation);
 
@@ -348,29 +363,35 @@ public final class OpenTelemetryRumBuilder {
     }
 
     private void initializeExporters(
+            Services services,
             InitializationEvents initializationEvents,
             BufferDelegatingSpanExporter bufferDelegatingSpanExporter,
-            BufferDelegatingLogExporter bufferedDelegatingLogExporter) {
+            BufferDelegatingLogExporter bufferedDelegatingLogExporter,
+            BufferDelegatingMetricExporter bufferDelegatingMetricExporter) {
 
-        DiskBufferingConfiguration diskBufferingConfiguration =
-                config.getDiskBufferingConfiguration();
+        DiskBufferingConfig diskBufferingConfig = config.getDiskBufferingConfig();
         SpanExporter spanExporter = buildSpanExporter();
         LogRecordExporter logsExporter = buildLogsExporter();
+        MetricExporter metricExporter = buildMetricExporter();
         SignalFromDiskExporter signalFromDiskExporter = null;
-        if (diskBufferingConfiguration.isEnabled()) {
+        if (diskBufferingConfig.getEnabled()) {
             try {
-                StorageConfiguration storageConfiguration = createStorageConfiguration();
+                StorageConfiguration storageConfiguration = createStorageConfiguration(services);
                 final SpanExporter originalSpanExporter = spanExporter;
                 spanExporter =
                         SpanToDiskExporter.create(originalSpanExporter, storageConfiguration);
                 final LogRecordExporter originalLogsExporter = logsExporter;
                 logsExporter =
                         LogRecordToDiskExporter.create(originalLogsExporter, storageConfiguration);
+                final MetricExporter originalMetricExporter = metricExporter;
+                metricExporter =
+                        MetricToDiskExporter.create(originalMetricExporter, storageConfiguration);
                 signalFromDiskExporter =
                         new SignalFromDiskExporter(
                                 SpanFromDiskExporter.create(
                                         originalSpanExporter, storageConfiguration),
-                                null,
+                                MetricFromDiskExporter.create(
+                                        originalMetricExporter, storageConfiguration),
                                 LogRecordFromDiskExporter.create(
                                         originalLogsExporter, storageConfiguration));
             } catch (IOException e) {
@@ -380,23 +401,8 @@ public final class OpenTelemetryRumBuilder {
         initializationEvents.spanExporterInitialized(spanExporter);
         bufferedDelegatingLogExporter.setDelegate(logsExporter);
         bufferDelegatingSpanExporter.setDelegate(spanExporter);
-        scheduleDiskTelemetryReader(signalFromDiskExporter);
-    }
-
-    @NonNull
-    private ServiceManager getServiceManager() {
-        if (serviceManager == null) {
-            serviceManager = ServiceManagerImpl.Companion.create(application);
-        }
-        // This can never be null since we never write `null` to it
-        return requireNonNull(serviceManager);
-    }
-
-    public OpenTelemetryRumBuilder setServiceManager(@NonNull ServiceManager serviceManager) {
-        requireNonNull(serviceManager, "serviceManager cannot be null");
-        checkNotBuilt();
-        this.serviceManager = serviceManager;
-        return this;
+        bufferDelegatingMetricExporter.setDelegate(metricExporter);
+        scheduleDiskTelemetryReader(services, signalFromDiskExporter);
     }
 
     @VisibleForTesting
@@ -412,16 +418,14 @@ public final class OpenTelemetryRumBuilder {
     public OpenTelemetryRumBuilder setExportScheduleHandler(
             @NonNull ExportScheduleHandler exportScheduleHandler) {
         requireNonNull(exportScheduleHandler, "exportScheduleHandler cannot be null");
-        checkNotBuilt();
         this.exportScheduleHandler = exportScheduleHandler;
         return this;
     }
 
-    private StorageConfiguration createStorageConfiguration() throws IOException {
-        Preferences preferences = getServiceManager().getPreferences();
-        CacheStorage storage = getServiceManager().getCacheStorage();
-        DiskBufferingConfiguration config = this.config.getDiskBufferingConfiguration();
-        DiskManager diskManager = new DiskManager(storage, preferences, config);
+    private StorageConfiguration createStorageConfiguration(Services services) throws IOException {
+        CacheStorage storage = services.getCacheStorage();
+        DiskBufferingConfig config = this.config.getDiskBufferingConfig();
+        DiskManager diskManager = new DiskManager(storage, config);
         return StorageConfiguration.builder()
                 .setRootDir(diskManager.getSignalsBufferDir())
                 .setMaxFileSize(diskManager.getMaxCacheFileSize())
@@ -431,15 +435,16 @@ public final class OpenTelemetryRumBuilder {
                 .setMinFileAgeForReadMillis(config.getMinFileAgeForReadMillis())
                 .setTemporaryFileProvider(
                         new SimpleTemporaryFileProvider(diskManager.getTemporaryDir()))
+                .setDebugEnabled(config.getDebugEnabled())
                 .build();
     }
 
-    private void scheduleDiskTelemetryReader(@Nullable SignalFromDiskExporter signalExporter) {
+    private void scheduleDiskTelemetryReader(
+            Services services, @Nullable SignalFromDiskExporter signalExporter) {
         if (exportScheduleHandler == null) {
-            ServiceManager serviceManager = getServiceManager();
             // TODO: Is it safe to get the work service yet here? If so, we can
             // avoid all this lazy supplier stuff....
-            Function0<PeriodicWorkService> getWorkService = serviceManager::getPeriodicWorkService;
+            Function0<PeriodicWork> getWorkService = services::getPeriodicWork;
             exportScheduleHandler =
                     new DefaultExportScheduleHandler(
                             new DefaultExportScheduler(getWorkService), getWorkService);
@@ -469,13 +474,12 @@ public final class OpenTelemetryRumBuilder {
      * @return this
      */
     public OpenTelemetryRumBuilder addOtelSdkReadyListener(Consumer<OpenTelemetrySdk> callback) {
-        checkNotBuilt();
         otelSdkReadyListeners.add(callback);
         return this;
     }
 
     /** Leverage the configuration to wire up various instrumentation components. */
-    private void applyConfiguration(InitializationEvents initializationEvents) {
+    private void applyConfiguration(Services services, InitializationEvents initializationEvents) {
         if (config.shouldGenerateSdkInitializationEvents()) {
             initializationEvents.recordConfiguration(config);
         }
@@ -498,22 +502,27 @@ public final class OpenTelemetryRumBuilder {
                     (tracerProviderBuilder, app) -> {
                         SpanProcessor networkAttributesSpanAppender =
                                 NetworkAttributesSpanAppender.create(
-                                        getServiceManager().getCurrentNetworkProvider());
+                                        services.getCurrentNetworkProvider());
                         return tracerProviderBuilder.addSpanProcessor(
                                 networkAttributesSpanAppender);
                     });
             initializationEvents.currentNetworkProviderInitialized();
         }
 
-        // Add span processor that appends screen attribute(s)
+        // Add processors that append screen attribute(s)
         if (config.shouldIncludeScreenAttributes()) {
-            addTracerProviderCustomizer(
-                    (tracerProviderBuilder, app) -> {
-                        SpanProcessor screenAttributesAppender =
-                                new ScreenAttributesSpanProcessor(
-                                        getServiceManager().getVisibleScreenService());
-                        return tracerProviderBuilder.addSpanProcessor(screenAttributesAppender);
-                    });
+            tracerProviderCustomizers.add(
+                    0,
+                    (builder, app) ->
+                            builder.addSpanProcessor(
+                                    new ScreenAttributesSpanProcessor(
+                                            services.getVisibleScreenTracker())));
+            loggerProviderCustomizers.add(
+                    0,
+                    (builder, app) ->
+                            builder.addLogRecordProcessor(
+                                    new ScreenAttributesLogRecordProcessor(
+                                            services.getVisibleScreenTracker())));
         }
     }
 
@@ -543,9 +552,6 @@ public final class OpenTelemetryRumBuilder {
                         .setResource(resource)
                         .addLogRecordProcessor(new SessionIdLogRecordAppender(sessionProvider))
                         .addLogRecordProcessor(
-                                new ScreenAttributesLogRecordProcessor(
-                                        getServiceManager().getVisibleScreenService()))
-                        .addLogRecordProcessor(
                                 new GlobalAttributesLogRecordAppender(
                                         config.getGlobalAttributesSupplier()));
         LogRecordProcessor batchLogsProcessor =
@@ -564,14 +570,23 @@ public final class OpenTelemetryRumBuilder {
         return spanExporterCustomizer.apply(defaultExporter);
     }
 
+    private MetricExporter buildMetricExporter() {
+        // TODO: Default to otlp...but how can we make endpoint and auth mandatory?
+        MetricExporter defaultExporter = LoggingMetricExporter.create();
+        return metricExporterCustomizer.apply(defaultExporter);
+    }
+
     private LogRecordExporter buildLogsExporter() {
+        // TODO: Default to otlp...but how can we make endpoint and auth mandatory?
         LogRecordExporter defaultExporter = SystemOutLogRecordExporter.create();
         return logRecordExporterCustomizer.apply(defaultExporter);
     }
 
-    private SdkMeterProvider buildMeterProvider(Application application) {
+    private SdkMeterProvider buildMeterProvider(
+            Application application, MetricExporter metricExporter) {
+        MetricReader reader = PeriodicMetricReader.create(metricExporter);
         SdkMeterProviderBuilder meterProviderBuilder =
-                SdkMeterProvider.builder().setResource(resource);
+                SdkMeterProvider.builder().registerMetricReader(reader).setResource(resource);
         for (BiFunction<SdkMeterProviderBuilder, Application, SdkMeterProviderBuilder> customizer :
                 meterProviderCustomizers) {
             meterProviderBuilder = customizer.apply(meterProviderBuilder, application);
@@ -582,11 +597,5 @@ public final class OpenTelemetryRumBuilder {
     private ContextPropagators buildFinalPropagators() {
         TextMapPropagator defaultPropagator = buildDefaultPropagator();
         return ContextPropagators.create(propagatorCustomizer.apply(defaultPropagator));
-    }
-
-    private void checkNotBuilt() {
-        if (isBuilt) {
-            throw new IllegalStateException("This method cannot be called after calling build");
-        }
     }
 }

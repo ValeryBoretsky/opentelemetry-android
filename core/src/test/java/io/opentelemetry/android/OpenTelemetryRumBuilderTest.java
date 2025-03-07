@@ -6,17 +6,16 @@
 package io.opentelemetry.android;
 
 import static io.opentelemetry.android.common.RumConstants.SCREEN_NAME_KEY;
+import static io.opentelemetry.api.common.AttributeKey.longKey;
 import static io.opentelemetry.api.common.AttributeKey.stringKey;
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.assertThat;
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.equalTo;
 import static io.opentelemetry.semconv.incubating.SessionIncubatingAttributes.SESSION_ID;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyCollection;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isA;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -24,11 +23,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import android.app.Application;
+import android.net.ConnectivityManager;
 import android.os.Looper;
 import androidx.annotation.NonNull;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import io.opentelemetry.android.config.OtelRumConfig;
-import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfiguration;
+import io.opentelemetry.android.features.diskbuffering.DiskBufferingConfig;
 import io.opentelemetry.android.features.diskbuffering.SignalFromDiskExporter;
 import io.opentelemetry.android.features.diskbuffering.scheduler.ExportScheduleHandler;
 import io.opentelemetry.android.instrumentation.AndroidInstrumentation;
@@ -38,18 +38,18 @@ import io.opentelemetry.android.instrumentation.internal.AndroidInstrumentationL
 import io.opentelemetry.android.internal.initialization.InitializationEvents;
 import io.opentelemetry.android.internal.services.CacheStorage;
 import io.opentelemetry.android.internal.services.Preferences;
-import io.opentelemetry.android.internal.services.ServiceManager;
-import io.opentelemetry.android.internal.services.applifecycle.AppLifecycleService;
+import io.opentelemetry.android.internal.services.Services;
+import io.opentelemetry.android.internal.services.applifecycle.AppLifecycle;
 import io.opentelemetry.android.internal.services.applifecycle.ApplicationStateListener;
-import io.opentelemetry.android.internal.services.visiblescreen.VisibleScreenService;
+import io.opentelemetry.android.internal.services.visiblescreen.VisibleScreenTracker;
 import io.opentelemetry.android.internal.session.SessionIdTimeoutHandler;
 import io.opentelemetry.android.session.SessionManager;
 import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.api.common.KeyValue;
-import io.opentelemetry.api.common.Value;
-import io.opentelemetry.api.incubator.events.EventLogger;
+import io.opentelemetry.api.incubator.logs.ExtendedLogRecordBuilder;
 import io.opentelemetry.api.logs.Logger;
 import io.opentelemetry.api.logs.Severity;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
@@ -58,18 +58,25 @@ import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.contrib.disk.buffering.SpanToDiskExporter;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.logs.data.LogRecordData;
+import io.opentelemetry.sdk.logs.data.internal.ExtendedLogRecordData;
 import io.opentelemetry.sdk.logs.export.LogRecordExporter;
 import io.opentelemetry.sdk.logs.export.SimpleLogRecordProcessor;
-import io.opentelemetry.sdk.logs.internal.SdkEventLoggerProvider;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.data.AggregationTemporality;
+import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.metrics.export.PeriodicMetricReader;
 import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions;
 import io.opentelemetry.sdk.testing.exporter.InMemoryLogRecordExporter;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricExporter;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
 import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -91,13 +98,13 @@ public class OpenTelemetryRumBuilderTest {
             Resource.getDefault().toBuilder().put("test.attribute", "abcdef").build();
     final InMemorySpanExporter spanExporter = InMemorySpanExporter.create();
     final InMemoryLogRecordExporter logsExporter = InMemoryLogRecordExporter.create();
-    final InMemoryLogRecordExporter logRecordExporter = InMemoryLogRecordExporter.create();
 
     @Mock Application application;
     @Mock Looper looper;
     @Mock android.content.Context applicationContext;
 
     @Mock InitializationEvents initializationEvents;
+    @Mock ConnectivityManager connectivityManager;
     private AutoCloseable mocks;
 
     @Before
@@ -105,6 +112,8 @@ public class OpenTelemetryRumBuilderTest {
         mocks = MockitoAnnotations.openMocks(this);
         when(application.getApplicationContext()).thenReturn(applicationContext);
         when(application.getMainLooper()).thenReturn(looper);
+        when(application.getSystemService(android.content.Context.CONNECTIVITY_SERVICE))
+                .thenReturn(connectivityManager);
         InitializationEvents.set(initializationEvents);
     }
 
@@ -114,20 +123,22 @@ public class OpenTelemetryRumBuilderTest {
         InitializationEvents.resetForTest();
         AndroidInstrumentationLoader.resetForTest();
         mocks.close();
+        Services.set(null);
     }
 
     @Test
     public void shouldRegisterApplicationStateWatcher() {
-        ServiceManager serviceManager = createServiceManager();
-        AppLifecycleService appLifecycleService = serviceManager.getAppLifecycleService();
+        Services services = createAndSetServiceManager();
+        AppLifecycle appLifecycle = services.getAppLifecycle();
 
-        makeBuilder().setServiceManager(serviceManager).build();
+        makeBuilder().build();
 
-        verify(appLifecycleService).registerListener(isA(ApplicationStateListener.class));
+        verify(appLifecycle).registerListener(isA(ApplicationStateListener.class));
     }
 
     @Test
     public void shouldBuildTracerProvider() {
+        createAndSetServiceManager();
         OpenTelemetryRum openTelemetryRum =
                 makeBuilder()
                         .setResource(resource)
@@ -155,16 +166,15 @@ public class OpenTelemetryRumBuilderTest {
                                     .hasResource(resource)
                                     .hasAttributesSatisfyingExactly(
                                             equalTo(SESSION_ID, sessionId),
-                                            equalTo(SCREEN_NAME_KEY, "unknown"));
+                                            equalTo(SCREEN_NAME_KEY, CUR_SCREEN_NAME));
                         });
     }
 
     @Test
     public void shouldBuildLogRecordProvider() {
-        ServiceManager serviceManager = createServiceManager();
+        createAndSetServiceManager();
         OpenTelemetryRum openTelemetryRum =
                 makeBuilder()
-                        .setServiceManager(serviceManager)
                         .setResource(resource)
                         .addLoggerProviderCustomizer(
                                 (logRecordProviderBuilder, app) ->
@@ -172,33 +182,106 @@ public class OpenTelemetryRumBuilderTest {
                                                 SimpleLogRecordProcessor.create(logsExporter)))
                         .build();
 
-        OpenTelemetrySdk sdk = (OpenTelemetrySdk) openTelemetryRum.getOpenTelemetry();
-        EventLogger eventLogger =
-                SdkEventLoggerProvider.create(sdk.getSdkLoggerProvider())
-                        .get("otel.initialization.events");
+        Logger logger =
+                openTelemetryRum
+                        .getOpenTelemetry()
+                        .getLogsBridge()
+                        .loggerBuilder("otel.initialization.events")
+                        .build();
+        ExtendedLogRecordBuilder eventLogger = (ExtendedLogRecordBuilder) logger.logRecordBuilder();
         Attributes attrs = Attributes.of(stringKey("mega"), "hit");
-        eventLogger.builder("test.event").put("body.field", "foo").setAttributes(attrs).emit();
+        eventLogger
+                .setEventName("test.event")
+                .setAllAttributes(attrs)
+                .setAttribute(stringKey("body.field"), "foo")
+                .emit();
 
         List<LogRecordData> logs = logsExporter.getFinishedLogRecordItems();
         assertThat(logs).hasSize(1);
         assertThat(logs.get(0))
                 .hasAttributesSatisfyingExactly(
                         equalTo(SESSION_ID, openTelemetryRum.getRumSessionId()),
-                        equalTo(stringKey("event.name"), "test.event"),
                         equalTo(SCREEN_NAME_KEY, CUR_SCREEN_NAME),
-                        equalTo(stringKey("mega"), "hit"))
+                        equalTo(stringKey("mega"), "hit"),
+                        equalTo(stringKey("body.field"), "foo"))
                 .hasResource(resource);
+        // TODO: verify event name inline above when the assertions framework can handle it
+        ExtendedLogRecordData log0 = (ExtendedLogRecordData) logs.get(0);
+        assertThat(log0.getEventName()).isEqualTo("test.event");
+    }
 
-        Value<?> bodyValue = logs.get(0).getBodyValue();
-        List<KeyValue> payload = (List<KeyValue>) bodyValue.getValue();
-        assertThat(payload).hasSize(1);
-        KeyValue expected = KeyValue.of("body.field", Value.of("foo"));
-        assertThat(payload.get(0)).isEqualTo(expected);
+    @Test
+    public void canCustomizeMetrics() {
+        InMemoryMetricReader metricReader = InMemoryMetricReader.create();
+        OpenTelemetryRum openTelemetryRum =
+                makeBuilder()
+                        .setResource(resource)
+                        .addMeterProviderCustomizer(
+                                (sdkMeterProviderBuilder, application) -> {
+                                    Attributes metricResAttrs =
+                                            Attributes.of(stringKey("mmm"), "nnn");
+                                    return sdkMeterProviderBuilder
+                                            .setResource(Resource.create(metricResAttrs))
+                                            .registerMetricReader(metricReader);
+                                })
+                        .build();
+
+        OpenTelemetrySdk sdk = (OpenTelemetrySdk) openTelemetryRum.getOpenTelemetry();
+        Meter meter = sdk.getSdkMeterProvider().meterBuilder("myMeter").build();
+        Attributes counterAttrs = Attributes.of(longKey("adams"), 42L);
+        LongCounter counter = meter.counterBuilder("myCounter").build();
+        counter.add(40, counterAttrs);
+        metricReader.forceFlush();
+        counter.add(2, counterAttrs);
+
+        List<MetricData> metrics = new ArrayList<>(metricReader.collectAllMetrics());
+        assertThat(metrics).hasSize(1);
+        assertThat(metrics.get(0))
+                .hasName("myCounter")
+                .hasLongSumSatisfying(
+                        sum ->
+                                sum.hasPointsSatisfying(
+                                        pt -> pt.hasValue(42L).hasAttributes(counterAttrs)))
+                .hasResourceSatisfying(res -> res.hasAttribute(stringKey("mmm"), "nnn"));
+    }
+
+    @Test
+    public void canCustomizeMetricExport() {
+        InMemoryMetricExporter exporter =
+                InMemoryMetricExporter.create(AggregationTemporality.DELTA); // NOT THE DEFAULT
+        PeriodicMetricReader periodicReader = PeriodicMetricReader.builder(exporter).build();
+        OpenTelemetryRum openTelemetryRum =
+                makeBuilder()
+                        .setResource(resource)
+                        .addMeterProviderCustomizer(
+                                (builder, app) ->
+                                        SdkMeterProvider.builder()
+                                                .registerMetricReader(periodicReader))
+                        .addMetricExporterCustomizer(x -> exporter)
+                        .build();
+
+        OpenTelemetrySdk sdk = (OpenTelemetrySdk) openTelemetryRum.getOpenTelemetry();
+        Meter meter = sdk.getSdkMeterProvider().meterBuilder("FOOMETER").build();
+        LongCounter counter = meter.counterBuilder("FOOCOUNTER").build();
+        counter.add(22);
+        periodicReader.forceFlush();
+        counter.add(2);
+        counter.add(3);
+        periodicReader.forceFlush();
+        List<MetricData> metrics = exporter.getFinishedMetricItems();
+
+        assertThat(metrics).hasSize(2);
+        assertThat(metrics.get(0))
+                .hasName("FOOCOUNTER")
+                .hasLongSumSatisfying(sum -> sum.hasPointsSatisfying(pt -> pt.hasValue(22L)));
+        assertThat(metrics.get(1))
+                .hasName("FOOCOUNTER")
+                .hasLongSumSatisfying(sum -> sum.hasPointsSatisfying(pt -> pt.hasValue(5L)));
     }
 
     @Test
     public void shouldInstallInstrumentation() {
-        ServiceManager serviceManager = createServiceManager();
+        Services services = createAndSetServiceManager();
         SessionManager sessionManager = mock();
         SessionIdTimeoutHandler timeoutHandler = mock();
         AndroidInstrumentation localInstrumentation = mock();
@@ -210,22 +293,20 @@ public class OpenTelemetryRumBuilderTest {
         OpenTelemetryRum rum =
                 new OpenTelemetryRumBuilder(application, buildConfig(), timeoutHandler)
                         .addInstrumentation(localInstrumentation)
-                        .setServiceManager(serviceManager)
                         .setSessionManager(sessionManager)
                         .build();
 
-        verify(serviceManager.getAppLifecycleService()).registerListener(timeoutHandler);
+        verify(services.getAppLifecycle()).registerListener(timeoutHandler);
 
         InstallationContext expectedCtx =
-                new InstallationContext(
-                        application, rum.getOpenTelemetry(), sessionManager, serviceManager);
+                new InstallationContext(application, rum.getOpenTelemetry(), sessionManager);
         verify(localInstrumentation).install(eq(expectedCtx));
         verify(classpathInstrumentation).install(eq(expectedCtx));
     }
 
     @Test
     public void shouldInstallInstrumentation_excludingClasspathImplsWhenRequestedInConfig() {
-        ServiceManager serviceManager = createServiceManager();
+        Services services = createAndSetServiceManager();
         SessionManager sessionManager = mock();
         SessionIdTimeoutHandler timeoutHandler = mock();
         AndroidInstrumentation localInstrumentation = mock();
@@ -240,15 +321,13 @@ public class OpenTelemetryRumBuilderTest {
                                 buildConfig().disableInstrumentationDiscovery(),
                                 timeoutHandler)
                         .addInstrumentation(localInstrumentation)
-                        .setServiceManager(serviceManager)
                         .setSessionManager(sessionManager)
                         .build();
 
-        verify(serviceManager.getAppLifecycleService()).registerListener(timeoutHandler);
+        verify(services.getAppLifecycle()).registerListener(timeoutHandler);
 
         InstallationContext expectedCtx =
-                new InstallationContext(
-                        application, rum.getOpenTelemetry(), sessionManager, serviceManager);
+                new InstallationContext(application, rum.getOpenTelemetry(), sessionManager);
         verify(localInstrumentation).install(eq(expectedCtx));
         verifyNoInteractions(classpathInstrumentation);
     }
@@ -306,18 +385,14 @@ public class OpenTelemetryRumBuilderTest {
 
     @Test
     public void setLogRecordExporterCustomizer() {
-        ServiceManager serviceManager = createServiceManager();
+        createAndSetServiceManager();
         AtomicBoolean wasCalled = new AtomicBoolean(false);
         Function<LogRecordExporter, LogRecordExporter> customizer =
                 x -> {
                     wasCalled.set(true);
                     return logsExporter;
                 };
-        OpenTelemetryRum rum =
-                makeBuilder()
-                        .setServiceManager(serviceManager)
-                        .addLogRecordExporterCustomizer(customizer)
-                        .build();
+        OpenTelemetryRum rum = makeBuilder().addLogRecordExporterCustomizer(customizer).build();
 
         Logger logger = rum.getOpenTelemetry().getLogsBridge().loggerBuilder("LogScope").build();
         logger.logRecordBuilder()
@@ -343,18 +418,14 @@ public class OpenTelemetryRumBuilderTest {
 
     @Test
     public void diskBufferingEnabled() {
-        ServiceManager serviceManager = createServiceManager();
-        CacheStorage cacheStorage = serviceManager.getCacheStorage();
-        doReturn(60 * 1024 * 1024L).when(cacheStorage).ensureCacheSpaceAvailable(anyLong());
+        createAndSetServiceManager();
         OtelRumConfig config = buildConfig();
         ExportScheduleHandler scheduleHandler = mock();
-        config.setDiskBufferingConfiguration(
-                DiskBufferingConfiguration.builder().setEnabled(true).build());
+        config.setDiskBufferingConfig(new DiskBufferingConfig(true));
         ArgumentCaptor<SpanExporter> exporterCaptor = ArgumentCaptor.forClass(SpanExporter.class);
 
         OpenTelemetryRum.builder(application, config)
                 .setExportScheduleHandler(scheduleHandler)
-                .setServiceManager(serviceManager)
                 .build();
 
         await().atMost(Duration.ofSeconds(30))
@@ -372,10 +443,9 @@ public class OpenTelemetryRumBuilderTest {
 
     @Test
     public void diskBufferingEnabled_when_exception_thrown() {
-        ServiceManager serviceManager = createServiceManager();
-        CacheStorage cacheStorage = serviceManager.getCacheStorage();
+        Services services = createAndSetServiceManager();
+        CacheStorage cacheStorage = services.getCacheStorage();
         ExportScheduleHandler scheduleHandler = mock();
-        doReturn(60 * 1024 * 1024L).when(cacheStorage).ensureCacheSpaceAvailable(anyLong());
         doAnswer(
                         invocation -> {
                             throw new IOException();
@@ -384,11 +454,9 @@ public class OpenTelemetryRumBuilderTest {
                 .getCacheDir();
         ArgumentCaptor<SpanExporter> exporterCaptor = ArgumentCaptor.forClass(SpanExporter.class);
         OtelRumConfig config = buildConfig();
-        config.setDiskBufferingConfiguration(
-                DiskBufferingConfiguration.builder().setEnabled(true).build());
+        config.setDiskBufferingConfig(new DiskBufferingConfig(true));
 
         OpenTelemetryRum.builder(application, config)
-                .setServiceManager(serviceManager)
                 .setExportScheduleHandler(scheduleHandler)
                 .build();
 
@@ -409,10 +477,8 @@ public class OpenTelemetryRumBuilderTest {
     public void sdkReadyListeners() {
         OtelRumConfig config = buildConfig();
         AtomicReference<OpenTelemetrySdk> seen = new AtomicReference<>();
-        OpenTelemetryRum.builder(application, config)
-                .addOtelSdkReadyListener(seen::set)
-                .setServiceManager(createServiceManager())
-                .build();
+        createAndSetServiceManager();
+        OpenTelemetryRum.builder(application, config).addOtelSdkReadyListener(seen::set).build();
         assertThat(seen.get()).isNotNull();
     }
 
@@ -422,8 +488,7 @@ public class OpenTelemetryRumBuilderTest {
         ExportScheduleHandler scheduleHandler = mock();
 
         OtelRumConfig config = buildConfig();
-        config.setDiskBufferingConfiguration(
-                DiskBufferingConfiguration.builder().setEnabled(false).build());
+        config.setDiskBufferingConfig(new DiskBufferingConfig(false));
 
         OpenTelemetryRum.builder(application, config)
                 .setExportScheduleHandler(scheduleHandler)
@@ -444,24 +509,23 @@ public class OpenTelemetryRumBuilderTest {
 
     @Test
     public void verifyGlobalAttrsForLogs() {
-        ServiceManager serviceManager = createServiceManager();
+        createAndSetServiceManager();
         OtelRumConfig otelRumConfig = buildConfig();
         otelRumConfig.setGlobalAttributes(
                 () -> Attributes.of(stringKey("someGlobalKey"), "someGlobalValue"));
 
         OpenTelemetryRum rum =
                 OpenTelemetryRum.builder(application, otelRumConfig)
-                        .setServiceManager(serviceManager)
                         .addLoggerProviderCustomizer(
                                 (sdkLoggerProviderBuilder, application) ->
                                         sdkLoggerProviderBuilder.addLogRecordProcessor(
-                                                SimpleLogRecordProcessor.create(logRecordExporter)))
+                                                SimpleLogRecordProcessor.create(logsExporter)))
                         .build();
 
         Logger logger = rum.getOpenTelemetry().getLogsBridge().loggerBuilder("LogScope").build();
         logger.logRecordBuilder().setAttribute(stringKey("localAttrKey"), "localAttrValue").emit();
 
-        List<LogRecordData> recordedLogs = logRecordExporter.getFinishedLogRecordItems();
+        List<LogRecordData> recordedLogs = logsExporter.getFinishedLogRecordItems();
         assertThat(recordedLogs).hasSize(1);
         LogRecordData logRecordData = recordedLogs.get(0);
         OpenTelemetryAssertions.assertThat(logRecordData)
@@ -474,40 +538,19 @@ public class OpenTelemetryRumBuilderTest {
                                 .build());
     }
 
-    @Test
-    public void verifyDefaultServicesAreCreated() {
-        AtomicReference<ServiceManager> serviceManagerHolder = new AtomicReference<>();
-        AndroidInstrumentation instrumentationTrap =
-                ctx -> serviceManagerHolder.set(ctx.getServiceManager());
-        makeBuilder().addInstrumentation(instrumentationTrap).build();
-        assertThat(serviceManagerHolder.get()).isNotNull();
-        assertThat(serviceManagerHolder.get().getAppLifecycleService()).isNotNull();
-        assertThat(serviceManagerHolder.get().getCacheStorage()).isNotNull();
-        assertThat(serviceManagerHolder.get().getCurrentNetworkProvider()).isNotNull();
-        assertThat(serviceManagerHolder.get().getPeriodicWorkService()).isNotNull();
-        assertThat(serviceManagerHolder.get().getPreferences()).isNotNull();
-        assertThat(serviceManagerHolder.get().getVisibleScreenService()).isNotNull();
-    }
-
-    @Test
-    public void verifyServiceManagerIsStarted() {
-        ServiceManager serviceManager = createServiceManager();
-        makeBuilder().setServiceManager(serviceManager).build();
-        verify(serviceManager).start();
-    }
-
     /**
      * @noinspection KotlinInternalInJava
      */
-    private static ServiceManager createServiceManager() {
-        ServiceManager serviceManager = mock(ServiceManager.class);
-        when(serviceManager.getAppLifecycleService()).thenReturn(mock(AppLifecycleService.class));
-        when(serviceManager.getCacheStorage()).thenReturn(mock(CacheStorage.class));
-        when(serviceManager.getPreferences()).thenReturn(mock(Preferences.class));
-        VisibleScreenService screenService = mock(VisibleScreenService.class);
+    private static Services createAndSetServiceManager() {
+        Services services = mock(Services.class);
+        when(services.getAppLifecycle()).thenReturn(mock(AppLifecycle.class));
+        when(services.getCacheStorage()).thenReturn(mock(CacheStorage.class));
+        when(services.getPreferences()).thenReturn(mock(Preferences.class));
+        VisibleScreenTracker screenService = mock(VisibleScreenTracker.class);
         when(screenService.getCurrentlyVisibleScreen()).thenReturn(CUR_SCREEN_NAME);
-        when(serviceManager.getVisibleScreenService()).thenReturn(screenService);
-        return serviceManager;
+        when(services.getVisibleScreenTracker()).thenReturn(screenService);
+        Services.set(services);
+        return services;
     }
 
     @NonNull

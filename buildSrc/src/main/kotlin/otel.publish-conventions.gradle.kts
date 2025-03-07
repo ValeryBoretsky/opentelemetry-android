@@ -24,7 +24,7 @@ if (android != null) {
         }
     }
 } else {
-    extensions.configure(JavaPluginExtension::class.java) {
+    extensions.findByType(JavaPluginExtension::class.java)?.apply {
         if (isARelease) {
             withJavadocJar()
             withSourcesJar()
@@ -39,7 +39,11 @@ afterEvaluate {
             if (android != null) {
                 from(components.findByName(androidVariantToRelease))
             } else {
-                from(components.findByName("java"))
+                val javaComponent =
+                    components.findByName("java") ?: components.findByName("javaPlatform")
+                javaComponent?.let {
+                    from(it)
+                }
             }
             pom {
                 val repoUrl = "https://github.com/open-telemetry/opentelemetry-android"
@@ -82,14 +86,17 @@ afterEvaluate {
 fun computeArtifactId(): String {
     val path = project.path
     if (!path.contains("instrumentation")) {
-        // Return default artifacId for non auto-instrumentation publications.
+        // Return default artifactId for non auto-instrumentation publications.
         return project.name
     }
 
     // Adding library name to its related auto-instrumentation subprojects.
     // For example, prepending "okhttp-3.0-" to both the "library" and "agent" subprojects inside the "okhttp-3.0" folder.
     val match = Regex("[^:]+:[^:]+\$").find(path)
-    val artifactId = match!!.value.replace(":", "-")
+    var artifactId = match!!.value.replace(":", "-")
+    if (!artifactId.startsWith("instrumentation-")) {
+        artifactId = "instrumentation-$artifactId"
+    }
 
     logger.debug("Using artifact id: '{}' for subproject: '{}'", artifactId, path)
     return artifactId

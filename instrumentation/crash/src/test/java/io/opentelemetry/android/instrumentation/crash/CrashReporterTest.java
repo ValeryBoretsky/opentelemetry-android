@@ -12,7 +12,6 @@ import static org.mockito.Mockito.mock;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import io.opentelemetry.android.instrumentation.InstallationContext;
-import io.opentelemetry.android.internal.services.ServiceManager;
 import io.opentelemetry.android.session.SessionManager;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -65,8 +64,7 @@ public class CrashReporterTest {
                 new InstallationContext(
                         RuntimeEnvironment.getApplication(),
                         openTelemetrySdk,
-                        mock(SessionManager.class),
-                        mock(ServiceManager.class));
+                        mock(SessionManager.class));
         instrumentation.install(ctx);
 
         String exceptionMessage = "boooom!";
@@ -85,7 +83,6 @@ public class CrashReporterTest {
 
         Attributes crashAttributes = logRecords.get(0).getAttributes();
         OpenTelemetryAssertions.assertThat(crashAttributes)
-                .containsEntry(ExceptionAttributes.EXCEPTION_ESCAPED, true)
                 .containsEntry(ExceptionAttributes.EXCEPTION_MESSAGE, exceptionMessage)
                 .containsEntry(ExceptionAttributes.EXCEPTION_TYPE, "java.lang.RuntimeException")
                 .containsEntry(ThreadIncubatingAttributes.THREAD_ID, crashingThread.getId())

@@ -5,6 +5,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("otel.errorprone-conventions")
     id("kotlin-kapt")
+    id("otel.animalsniffer-conventions")
 }
 
 val javaVersion = rootProject.extra["java_version"] as JavaVersion
@@ -22,12 +23,12 @@ android {
         // we rely on dependabot for dependency updates
         disable.add("GradleDependency")
         disable.add("AndroidGradlePluginVersion")
+        disable.add("NewApi")
     }
 
     compileOptions {
         sourceCompatibility(javaVersion)
         targetCompatibility(javaVersion)
-        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -44,6 +45,7 @@ tasks.withType<Test> {
 
 val libs = extensions.getByType<VersionCatalogsExtension>().named("libs")
 dependencies {
+    implementation(libs.findLibrary("androidx-annotation").get())
     implementation(libs.findLibrary("findbugs-jsr305").get())
     implementation(libs.findLibrary("auto-service-annotations").get())
     kapt(libs.findLibrary("auto-service-processor").get())
@@ -53,5 +55,4 @@ dependencies {
     testRuntimeOnly(libs.findLibrary("junit-platform-launcher").get())
     testImplementation(libs.findLibrary("opentelemetry-sdk-testing").get())
     testImplementation(libs.findLibrary("androidx-junit").get())
-    coreLibraryDesugaring(libs.findLibrary("desugarJdkLibs").get())
 }

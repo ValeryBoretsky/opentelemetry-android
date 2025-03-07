@@ -5,8 +5,9 @@
 
 package io.opentelemetry.instrumentation.library.httpurlconnection;
 
-import android.annotation.SuppressLint;
+import android.os.Build;
 import android.os.SystemClock;
+import androidx.annotation.RequiresApi;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.instrumentation.library.httpurlconnection.internal.HttpUrlConnectionSingletons;
 import io.opentelemetry.instrumentation.library.httpurlconnection.internal.RequestPropertySetter;
@@ -76,9 +77,16 @@ public class HttpUrlReplacements {
         return replace(connection, () -> connection.getContentLength());
     }
 
-    @SuppressLint("NewApi")
     public static long replacementForContentLengthLong(URLConnection connection) {
-        return replace(connection, () -> connection.getContentLengthLong());
+        return replace(
+                connection,
+                new ResultProvider<Long>() {
+                    @RequiresApi(Build.VERSION_CODES.N)
+                    @Override
+                    public Long get() {
+                        return connection.getContentLengthLong();
+                    }
+                });
     }
 
     public static long replacementForExpiration(URLConnection connection) {
@@ -106,10 +114,17 @@ public class HttpUrlReplacements {
         return replace(connection, () -> connection.getHeaderFieldInt(name, Default));
     }
 
-    @SuppressLint("NewApi")
     public static long replacementForHeaderFieldLong(
             URLConnection connection, String name, long Default) {
-        return replace(connection, () -> connection.getHeaderFieldLong(name, Default));
+        return replace(
+                connection,
+                new ResultProvider<Long>() {
+                    @RequiresApi(Build.VERSION_CODES.N)
+                    @Override
+                    public Long get() {
+                        return connection.getHeaderFieldLong(name, Default);
+                    }
+                });
     }
 
     public static long replacementForHeaderFieldDate(
